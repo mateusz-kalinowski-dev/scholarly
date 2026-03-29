@@ -1,0 +1,133 @@
+version: '3.9'
+
+services:
+  # ── Infrastructure ───────────────────────────────────────────────────────────
+
+  neo4j:
+    image: neo4j:5
+    environment:
+      NEO4J_AUTH: neo4j/password
+    ports:
+      - '7474:7474'  # Browser UI
+      - '7687:7687'  # Bolt
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:7474']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - '9000:9000'   # API
+      - '9001:9001'   # Console UI
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - '11434:11434'
+    volumes:
+      - ollama_data:/root/.ollama
+    # To pull a model: docker exec scholarly-ollama-1 ollama pull llama3.2
+
+  # ── Application Services ─────────────────────────────────────────────────────
+
+  backend:
+    build:
+      context: ./backend
+    env_file: ./backend/.env.example
+    environment:
+      NEO4J_URI: bolt://neo4j:7687
+      REDIS_URL: redis://redis:6379
+      MINIO_ENDPOINT: minio
+    ports:
+      - '3000:3000'
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  scraper:
+    build:
+      context: ./services/scraper
+    env_file: ./services/scraper/.env.example
+    environment:
+      MINIO_ENDPOINT: minio
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  processor:
+    build:
+      context: ./services/processor
+    env_file: ./services/processor/.env.example
+    environment:
+      MINIO_ENDPOINT: minio
+      REDIS_URL: redis://redis:6379
+      NEO4J_URI: bolt://neo4j:7687
+      LLM_BASE_URL: http://llm:8000
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+
+  llm:
+    build:
+      context: ./services/llm
+    env_file: ./services/llm/.env.example
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+    ports:
+      - '8000:8000'
+    depends_on:
+      - ollama
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: http://localhost:3000
+    ports:
+      - '5173:80'
+    depends_on:
+      - backend
+
+volumes:
+  neo4j_data:
+  redis_data:
+  minio_data:
+  ollama_data:
