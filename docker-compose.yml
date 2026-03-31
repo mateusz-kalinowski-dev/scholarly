@@ -3,6 +3,7 @@ version: "3.9"
 services:
   # ── Infrastructure ───────────────────────────────────────────────────────────
   postgres:
+    container_name: postgres_db
     image: postgres:15-alpine
     environment:
       POSTGRES_USER: user
@@ -21,6 +22,7 @@ services:
       - app-network
 
   neo4j:
+    container_name: neo4j_db
     image: neo4j:5
     environment:
       NEO4J_AUTH: neo4j/secretpassword
@@ -38,6 +40,7 @@ services:
       - app-network
 
   redis:
+    container_name: redis
     image: redis:7-alpine
     ports:
       - "6379:6379"
@@ -52,6 +55,7 @@ services:
       - app-network
 
   minio:
+    container_name: minio
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
@@ -71,15 +75,24 @@ services:
       - app-network
 
   ollama:
+    container_name: ollama
     image: ollama/ollama:latest
     ports:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+    entrypoint: /bin/sh
+    command: -c "ollama serve & sleep 5 && ollama pull llama3 && wait"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - app-network
 
   rabbitmq:
+    container_name: rabbitmq
     image: rabbitmq:3-management-alpine
     ports:
       - "5672:5672" # Port do komunikacji dla Workera w Pythonie
@@ -99,6 +112,7 @@ services:
 
   # ── Application Services ─────────────────────────────────────────────────────
   scraper:
+    container_name: scraper
     build:
       context: ./services/scraper
     env_file: ./services/scraper/.env.example
@@ -117,6 +131,7 @@ services:
       - app-network
 
   processor:
+    container_name: processor
     build:
       context: ./services/processor
     env_file: ./services/processor/.env.example
@@ -125,7 +140,7 @@ services:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       REDIS_URL: redis://redis:6379
       NEO4J_URI: bolt://neo4j:7687
-      LLM_BASE_URL: http://llm:8000
+      LLM_BASE_URL: http://ollama:11434
     depends_on:
       redis:
         condition: service_healthy
@@ -152,6 +167,7 @@ services:
   #    - app-network
 
   backend:
+    container_name: backend
     build:
       context: ./backend
     env_file: ./backend/.env.example
@@ -179,6 +195,7 @@ services:
       - app-network
 
   frontend:
+    container_name: frontend
     build:
       context: ./frontend
     ports:

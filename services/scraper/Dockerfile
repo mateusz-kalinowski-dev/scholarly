@@ -1,15 +1,16 @@
-FROM node:20-alpine AS builder
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY tsconfig.json ./
-COPY src ./src
-RUN npm run build
+FROM python:3.14-slim
 
-FROM node:20-alpine
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci --omit=dev
-COPY --from=builder /app/dist ./dist
-ENV NODE_ENV=production
-CMD ["node", "dist/index.js"]
+
+COPY pyproject.toml .
+
+RUN uv pip install --system -r pyproject.toml
+
+COPY . .
+
+CMD ["python", "scraper.py"]
