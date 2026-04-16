@@ -13,4 +13,4 @@ RUN uv pip install --system -r pyproject.toml
 
 COPY . .
 
-CMD ["python", "scraper.py"]
+CMD ["python", "scraper2.py"]
