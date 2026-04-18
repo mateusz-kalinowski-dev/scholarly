@@ -208,17 +208,39 @@ services:
     networks:
       - app-network
 
-  frontend:
-    container_name: frontend
+  frontend-dev:
+    profiles: ["dev"]
+    container_name: frontend_dev
     build:
       context: ./frontend
-      #dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+      - VITE_API_URL=http://backend:3000
+    depends_on:
+      - backend
+    networks:
+      - app-network
+    restart: always
+
+  frontend-prod:
+    profiles: ["prod"]
+    container_name: frontend_prod
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
     ports:
       - "80:80"
     depends_on:
       - backend
     networks:
       - app-network
+    restart: always
 
 volumes:
   postgres_data_v2:
@@ -227,6 +249,7 @@ volumes:
   minio_data:
   ollama_data:
   rabbitmq_data:
+  frontend-dist:
 
 networks:
   app-network:

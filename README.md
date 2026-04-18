@@ -1,3 +1,8 @@
+```sh
+docker compose up --build # dev
+docker compose -f docker-compose.yml up --build  # prod
+```
+
 # Scholarly
 
 A full-stack application for automatically discovering, scraping, and AI-summarising academic journal papers, built for a Master's thesis.
@@ -32,17 +37,17 @@ Infrastructure (via Docker Compose):
 
 ## Services
 
-| Service | Port | Description |
-|---------|------|-------------|
-| `frontend` | 5173 | React + Vite UI |
-| `backend` | 3000 | Express.js REST API |
-| `scraper` | — | Cron-based arXiv PDF scraper |
-| `processor` | — | PDF → LLM → Neo4j pipeline |
-| `llm` | 8000 | LLM inference REST API |
-| `neo4j` | 7474 / 7687 | Graph database |
-| `minio` | 9000 / 9001 | Object storage |
-| `redis` | 6379 | Message queue |
-| `ollama` | 11434 | Local LLM runtime |
+| Service     | Port        | Description                  |
+| ----------- | ----------- | ---------------------------- |
+| `frontend`  | 5173        | React + Vite UI              |
+| `backend`   | 3000        | Express.js REST API          |
+| `scraper`   | —           | Cron-based arXiv PDF scraper |
+| `processor` | —           | PDF → LLM → Neo4j pipeline   |
+| `llm`       | 8000        | LLM inference REST API       |
+| `neo4j`     | 7474 / 7687 | Graph database               |
+| `minio`     | 9000 / 9001 | Object storage               |
+| `redis`     | 6379        | Message queue                |
+| `ollama`    | 11434       | Local LLM runtime            |
 
 ## Quick Start
 
