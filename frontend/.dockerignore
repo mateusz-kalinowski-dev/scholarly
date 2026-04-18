@@ -1,4 +1,9 @@
 node_modules
+npm-debug.log
 dist
 .git
 .env
+.env.example
+Dockerfile
+.dockerignore
+nginx.conf
