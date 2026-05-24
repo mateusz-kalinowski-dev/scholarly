@@ -15,12 +15,22 @@ export default defineConfig({
     host: true,
     port: 5173,
     watch: { usePolling: true },
-    // TO DODAJEMY:
     proxy: {
-      "/api": {
-        target: process.env.VITE_API_URL || "http://localhost:3000",
+      "/search": {
+        target: process.env.VITE_PROXY_TARGET || "http://localhost:8000",
         changeOrigin: true,
-        rewrite: (path) => path,
+      },
+      "/chat": {
+        target: process.env.VITE_PROXY_TARGET || "http://localhost:8000",
+        changeOrigin: true,
+      },
+      "/papers": {
+        target: process.env.VITE_PROXY_TARGET || "http://localhost:8000",
+        changeOrigin: true,
+      },
+      "/health": {
+        target: process.env.VITE_PROXY_TARGET || "http://localhost:8000",
+        changeOrigin: true,
       },
     },
   },

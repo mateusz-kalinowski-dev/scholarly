@@ -1,0 +1,17 @@
+[project]
+name = "arxiv-rag-fastapi"
+version = "0.2.0"
+description = "RAG API: search, chat, papers"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "httpx>=0.27.0",
+    "psycopg[binary]>=3.1.18",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.1",
+]
+
+[project.scripts]
+dev = "uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"

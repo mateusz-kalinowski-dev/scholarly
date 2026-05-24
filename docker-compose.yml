@@ -20,24 +20,6 @@ services:
     networks:
       - app-network
 
-  neo4j:
-    container_name: neo4j_db
-    image: neo4j:5
-    environment:
-      NEO4J_AUTH: neo4j/secretpassword
-    ports:
-      - "7474:7474" # Browser UI
-      - "7687:7687" # Bolt
-    volumes:
-      - neo4j_data:/data
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:7474"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    networks:
-      - app-network
-
   redis:
     container_name: redis
     image: redis:7-alpine
@@ -61,8 +43,8 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
-      - "9000:9000" # API
-      - "9001:9001" # Console UI
+      - "9000:9000"
+      - "9001:9001"
     volumes:
       - minio_data:/data
     healthcheck:
@@ -79,22 +61,14 @@ services:
     ports:
       - "11434:11434"
     volumes:
+      # Modele (~10 GB) — wolumen ollama_data, bez ponownego pull po restarcie
       - ollama_data:/root/.ollama
-    entrypoint: /bin/sh
-    #command: -c "ollama serve & sleep 5 && ollama pull llama3 && wait"
-    #command: -c "ollama serve & sleep 5 && ollama pull gemma4 && wait"
-    #command: -c "ollama serve & sleep 5 && ollama pull llama3 && ollama pull gemma4:e2b && ollama pull nomic-embed-text && wait"
-    command: >
-      -c "ollama serve & 
-      sleep 5; 
-      ollama list | grep -q 'gemma4:e2b' || ollama pull gemma4:e2b; 
-      ollama list | grep -q 'nomic-embed-text' || ollama pull nomic-embed-text; 
-      wait"
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 30s
     networks:
       - app-network
     deploy:
@@ -105,15 +79,33 @@ services:
               count: 1
               capabilities: [gpu]
 
+  # Jednorazowy pull modeli do wolumenu (pomija jesli juz sa)
+  ollama-init:
+    container_name: ollama_init
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "ollama show gemma4:e2b || ollama pull gemma4:e2b; ollama show nomic-embed-text || ollama pull nomic-embed-text"
+    restart: "no"
+    networks:
+      - app-network
+
   rabbitmq:
     container_name: rabbitmq
     image: rabbitmq:3-management-alpine
     ports:
-      - "5672:5672" # Port do komunikacji dla Workera w Pythonie
-      - "15672:15672" # Panel webowy RabbitMQ (Dashboard)
+      - "5672:5672"
+      - "15672:15672"
     environment:
-      - RABBITMQ_DEFAULT_USER=guest
-      - RABBITMQ_DEFAULT_PASS=guest
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
@@ -131,18 +123,21 @@ services:
       context: ./services/scraper
     env_file: ./services/scraper/.env.example
     environment:
-      MINIO_ENDPOINT: minio:9000
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       REDIS_URL: redis://redis:6379
+      ARXIV_PAGE_SIZE: 200
+      ARXIV_REQUEST_DELAY: 3.0
+      ARXIV_MAX_PAGES_PER_RUN: 40
+      INITIAL_LOOKBACK_DAYS: 30
+      SCRAPER_INTERVAL_SECONDS: 3600
     depends_on:
       redis:
-        condition: service_healthy
-      minio:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
     networks:
       - app-network
+    restart: unless-stopped
 
   processor:
     container_name: processor
@@ -150,106 +145,87 @@ services:
       context: ./services/processor
     env_file: ./services/processor/.env.example
     environment:
+      POSTGRES_URL: postgresql://admin:admin@postgres:5432/papers_db
       MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       REDIS_URL: redis://redis:6379
-      NEO4J_URI: bolt://neo4j:7687
       LLM_BASE_URL: http://ollama:11434
-    depends_on:
-      redis:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-      neo4j:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    networks:
-      - app-network
-
-  #llm:
-  #  build:
-  #    context: ./services/llm
-  #  env_file: ./services/llm/.env.example
-  #  environment:
-  #    OLLAMA_BASE_URL: http://ollama:11434
-  #  ports:
-  #    - "8000:8000"
-  #  depends_on:
-  #    - ollama
-  #  networks:
-  #    - app-network
-
-  backend:
-    container_name: backend
-    build:
-      context: ./backend
-    env_file: ./backend/.env.example
-    environment:
-      - PORT=4000
-      - POSTGRES_URL=postgresql://user:password@postgres:5432/papers_db
-      - NEO4J_URI=bolt://neo4j:7687
-      - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=secretpassword
-      - MINIO_ENDPOINT=minio:9000
-      - MINIO_ACCESS_KEY=minioadmin
-      - MINIO_SECRET_KEY=minioadmin
-    expose:
-      - "3000"
+      EMBED_MODEL: nomic-embed-text
+      EMBED_BATCH_SIZE: 32
+      EMBED_REQUEST_TIMEOUT: 300
+      RABBITMQ_PREFETCH: 1
+      IVFFLAT_INDEX_EVERY_N_PAPERS: 25
+      IVFFLAT_MIN_CHUNKS: 100
     depends_on:
       postgres:
         condition: service_healthy
-      neo4j:
-        condition: service_healthy
       redis:
         condition: service_healthy
       minio:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
     networks:
       - app-network
+    restart: unless-stopped
 
-  frontend-dev:
-    profiles: ["dev"]
-    container_name: frontend_dev
+  frontend:
+    container_name: frontend
     build:
       context: ./frontend
       dockerfile: Dockerfile.dev
+    ports:
+      - "5173:5173"
     volumes:
       - ./frontend:/app
       - /app/node_modules
-    ports:
-      - "5173:5173"
     environment:
-      - CHOKIDAR_USEPOLLING=true
-      - VITE_API_URL=http://backend:3000
+      VITE_API_URL: ""
+      VITE_PROXY_TARGET: http://api:8000
     depends_on:
-      - backend
+      - api
     networks:
       - app-network
-    restart: always
+    restart: unless-stopped
 
-  frontend-prod:
-    profiles: ["prod"]
-    container_name: frontend_prod
+  api:
+    container_name: fastapi
     build:
-      context: ./frontend
-      dockerfile: Dockerfile.prod
+      context: ./fastapi
+    env_file: ./fastapi/.env.example
     ports:
-      - "80:80"
+      - "8000:8000"
+    environment:
+      POSTGRES_URL: postgresql://admin:admin@postgres:5432/papers_db
+      OLLAMA_BASE_URL: http://ollama:11434
+      EMBED_MODEL: nomic-embed-text
+      LLM_MODEL: gemma4:e2b
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
     depends_on:
-      - backend
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
     networks:
       - app-network
-    restart: always
+    restart: unless-stopped
 
 volumes:
   postgres_data_v2:
-  neo4j_data:
   redis_data:
   minio_data:
   ollama_data:
   rabbitmq_data:
-  frontend-dist:
 
 networks:
   app-network:
