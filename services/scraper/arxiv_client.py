@@ -12,7 +12,17 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-ARXIV_API = "http://export.arxiv.org/api/query?"
+ARXIV_API = "https://export.arxiv.org/api/query?"
+
+
+def _retry_delay(response: requests.Response | None, attempt: int, base: float) -> float:
+    if response is not None:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after and retry_after.isdigit():
+            return max(float(retry_after), base)
+        if response.status_code in (429, 503):
+            return max(base * (3**attempt), 30.0)
+    return base * (2**attempt)
 
 
 def fetch_page(
@@ -30,6 +40,7 @@ def fetch_page(
 
     headers = {"User-Agent": ARXIV_USER_AGENT}
     base_delay = ARXIV_REQUEST_DELAY
+    response: requests.Response | None = None
 
     for attempt in range(ARXIV_MAX_RETRIES):
         try:
@@ -39,18 +50,24 @@ def fetch_page(
                 max_results,
                 attempt + 1,
             )
-            response = requests.get(url, headers=headers, timeout=60)
+            response = requests.get(url, headers=headers, timeout=90)
 
             if response.status_code == 200:
                 time.sleep(ARXIV_REQUEST_DELAY)
                 return feedparser.parse(response.content)
 
-            delay = base_delay * (2**attempt)
-            logger.warning("arXiv HTTP %s — czekam %ss", response.status_code, delay)
+            delay = _retry_delay(response, attempt, base_delay)
+            logger.warning(
+                "arXiv HTTP %s — czekam %ss (start=%s)",
+                response.status_code,
+                delay,
+                start,
+            )
             time.sleep(delay)
         except requests.RequestException as exc:
-            delay = base_delay * (2**attempt)
+            delay = _retry_delay(response, attempt, base_delay)
             logger.error("arXiv sieć: %s — czekam %ss", exc, delay)
             time.sleep(delay)
 
+    logger.error("arXiv: wyczerpano próby dla start=%s — NIE przesuwam kursora", start)
     return None

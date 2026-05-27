@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from psycopg import connect
 
+from arxiv_ids import normalize_arxiv_id
 from chunking import TextChunk
 from config import POSTGRES_URL
 
@@ -12,6 +13,7 @@ def _to_vector(values: list[float]) -> str:
 
 
 def paper_is_fully_processed(arxiv_id: str) -> bool:
+    base_id = normalize_arxiv_id(arxiv_id)
     with connect(POSTGRES_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -19,10 +21,25 @@ def paper_is_fully_processed(arxiv_id: str) -> bool:
                 SELECT embedding_status FROM papers
                 WHERE arxiv_id = %s
                 """,
-                (arxiv_id,),
+                (base_id,),
             )
             row = cur.fetchone()
     return bool(row and row[0] == "DONE")
+
+
+def paper_is_skipped(arxiv_id: str) -> bool:
+    """Trwały brak źródła (parsing FAILED) — nie przetwarzaj ponownie."""
+    base_id = normalize_arxiv_id(arxiv_id)
+    with connect(POSTGRES_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT parsing_status FROM papers WHERE arxiv_id = %s
+                """,
+                (base_id,),
+            )
+            row = cur.fetchone()
+    return bool(row and row[0] == "FAILED")
 
 
 def upsert_paper_metadata(data: dict) -> tuple[str, str, bool] | None:
@@ -30,8 +47,10 @@ def upsert_paper_metadata(data: dict) -> tuple[str, str, bool] | None:
     Zwraca (paper_uuid, arxiv_id, should_process).
     should_process=False gdy praca już ma embedding_status=DONE (bez MinIO/pipeline).
     """
-    arxiv_id = data["id"]
+    arxiv_id = normalize_arxiv_id(data["id"])
     if paper_is_fully_processed(arxiv_id):
+        return None
+    if paper_is_skipped(arxiv_id):
         return None
 
     arxiv_url = data.get("arxiv_url") or f"https://arxiv.org/abs/{arxiv_id}"
@@ -205,6 +224,7 @@ def save_paper_embeddings(
 
 
 def mark_failed(arxiv_id: str, stage: str) -> None:
+    base_id = normalize_arxiv_id(arxiv_id)
     column = {
         "parsing": "parsing_status",
         "chunking": "chunking_status",
@@ -214,7 +234,25 @@ def mark_failed(arxiv_id: str, stage: str) -> None:
         with conn.cursor() as cur:
             cur.execute(
                 f"UPDATE papers SET {column} = 'FAILED' WHERE arxiv_id = %s",
-                (arxiv_id,),
+                (base_id,),
+            )
+            conn.commit()
+
+
+def mark_source_unavailable(arxiv_id: str) -> None:
+    """Brak PDF/e-print — nie retry, scraper też pomija."""
+    base_id = normalize_arxiv_id(arxiv_id)
+    with connect(POSTGRES_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE papers SET
+                    parsing_status = 'FAILED',
+                    chunking_status = 'FAILED',
+                    embedding_status = 'FAILED'
+                WHERE arxiv_id = %s
+                """,
+                (base_id,),
             )
             conn.commit()
 

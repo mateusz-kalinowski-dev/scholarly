@@ -1,3 +1,38 @@
+x-processor: &processor
+  build:
+    context: ./services/processor
+  env_file: ./services/processor/.env.example
+  environment:
+    POSTGRES_URL: postgresql://admin:admin@postgres:5432/papers_db
+    MINIO_ENDPOINT: minio:9000
+    MINIO_ACCESS_KEY: minioadmin
+    MINIO_SECRET_KEY: minioadmin
+    RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+    REDIS_URL: redis://redis:6379
+    LLM_BASE_URL: http://ollama:11434
+    EMBED_MODEL: nomic-embed-text
+    EMBED_BATCH_SIZE: 32
+    EMBED_REQUEST_TIMEOUT: 300
+    RABBITMQ_PREFETCH: 1
+    IVFFLAT_INDEX_EVERY_N_PAPERS: 25
+    IVFFLAT_MIN_CHUNKS: 100
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+    rabbitmq:
+      condition: service_healthy
+    ollama:
+      condition: service_healthy
+    ollama-init:
+      condition: service_completed_successfully
+  networks:
+    - app-network
+  restart: unless-stopped
+
 services:
   # ── Infrastructure ───────────────────────────────────────────────────────────
   postgres:
@@ -61,8 +96,11 @@ services:
     ports:
       - "11434:11434"
     volumes:
-      # Modele (~10 GB) — wolumen ollama_data, bez ponownego pull po restarcie
       - ollama_data:/root/.ollama
+    environment:
+      # Równoległe żądania embed/chat (3 procesory + API)
+      OLLAMA_NUM_PARALLEL: 4
+      OLLAMA_MAX_LOADED_MODELS: 2
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
@@ -125,12 +163,18 @@ services:
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       REDIS_URL: redis://redis:6379
+      POSTGRES_URL: postgresql://admin:admin@postgres:5432/papers_db
       ARXIV_PAGE_SIZE: 200
-      ARXIV_REQUEST_DELAY: 3.0
-      ARXIV_MAX_PAGES_PER_RUN: 40
+      ARXIV_REQUEST_DELAY: 5.0
+      ARXIV_MAX_RETRIES: 6
+      ARXIV_MAX_PAGES_PER_RUN: 0
       INITIAL_LOOKBACK_DAYS: 30
-      SCRAPER_INTERVAL_SECONDS: 3600
+      SCRAPER_INTERVAL_SECONDS: 120
+      CHECKPOINT_COMMIT_EVERY: 25
+      SCRAPER_RESET_ON_START: "false"
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       rabbitmq:
@@ -139,41 +183,15 @@ services:
       - app-network
     restart: unless-stopped
 
+  # 3 równoległe workery (RabbitMQ round-robin)
   processor:
-    container_name: processor
-    build:
-      context: ./services/processor
-    env_file: ./services/processor/.env.example
-    environment:
-      POSTGRES_URL: postgresql://admin:admin@postgres:5432/papers_db
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
-      REDIS_URL: redis://redis:6379
-      LLM_BASE_URL: http://ollama:11434
-      EMBED_MODEL: nomic-embed-text
-      EMBED_BATCH_SIZE: 32
-      EMBED_REQUEST_TIMEOUT: 300
-      RABBITMQ_PREFETCH: 1
-      IVFFLAT_INDEX_EVERY_N_PAPERS: 25
-      IVFFLAT_MIN_CHUNKS: 100
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-      ollama:
-        condition: service_healthy
-      ollama-init:
-        condition: service_completed_successfully
-    networks:
-      - app-network
-    restart: unless-stopped
+    <<: *processor
+
+  processor-2:
+    <<: *processor
+
+  processor-3:
+    <<: *processor
 
   frontend:
     container_name: frontend

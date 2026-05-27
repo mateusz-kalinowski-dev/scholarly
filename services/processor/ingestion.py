@@ -10,9 +10,15 @@ import tarfile
 import requests
 from minio import Minio
 
+from arxiv_ids import normalize_arxiv_id
 from config import BUCKET_NAME, MINIO_ACCESS_KEY, MINIO_ENDPOINT, MINIO_SECRET_KEY
 
 logger = logging.getLogger(__name__)
+
+
+class SourceUnavailableError(Exception):
+    """Brak źródła na arXiv (404/410) — ACK bez requeue."""
+
 
 minio_client = Minio(
     MINIO_ENDPOINT,
@@ -26,24 +32,32 @@ if not minio_client.bucket_exists(BUCKET_NAME):
 
 
 def source_url_for(arxiv_id: str, source_url: str | None) -> str:
-    if source_url:
-        return source_url
-    return f"https://arxiv.org/e-print/{arxiv_id}"
+    base = normalize_arxiv_id(arxiv_id)
+    return f"https://arxiv.org/e-print/{base}"
 
 
 def pdf_url_for(arxiv_id: str, pdf_url: str | None) -> str:
-    if pdf_url:
-        return pdf_url
-    return f"https://arxiv.org/pdf/{arxiv_id}"
+    base = normalize_arxiv_id(arxiv_id)
+    return f"https://arxiv.org/pdf/{base}"
+
+
+def _http_get(url: str) -> requests.Response:
+    response = requests.get(url, timeout=120)
+    if response.status_code in (404, 410):
+        raise SourceUnavailableError(
+            f"Źródło niedostępne ({response.status_code}): {url}"
+        )
+    response.raise_for_status()
+    return response
 
 
 def download_and_extract_tex(source_url: str, arxiv_id: str) -> tuple[str, str]:
-    year = f"20{arxiv_id[0:2]}"
-    month = arxiv_id[2:4]
-    object_name = f"{year}/{month}/{arxiv_id}.txt"
+    base_id = normalize_arxiv_id(arxiv_id)
+    year = f"20{base_id[0:2]}"
+    month = base_id[2:4]
+    object_name = f"{year}/{month}/{base_id}.txt"
 
-    response = requests.get(source_url, timeout=120)
-    response.raise_for_status()
+    response = _http_get(source_url)
     file_bytes = io.BytesIO(response.content)
     text_content = ""
 
@@ -69,12 +83,12 @@ def download_and_extract_tex(source_url: str, arxiv_id: str) -> tuple[str, str]:
 def extract_text_from_pdf(pdf_url: str, arxiv_id: str) -> tuple[str, str]:
     import fitz
 
-    year = f"20{arxiv_id[0:2]}"
-    month = arxiv_id[2:4]
-    object_name = f"{year}/{month}/{arxiv_id}.txt"
+    base_id = normalize_arxiv_id(arxiv_id)
+    year = f"20{base_id[0:2]}"
+    month = base_id[2:4]
+    object_name = f"{year}/{month}/{base_id}.txt"
 
-    response = requests.get(pdf_url, timeout=120)
-    response.raise_for_status()
+    response = _http_get(pdf_url)
     doc = fitz.open(stream=response.content, filetype="pdf")
     parts = [page.get_text() for page in doc]
     doc.close()
@@ -96,16 +110,26 @@ def _upload_text(object_name: str, text_content: str) -> tuple[str, str]:
 
 
 def fetch_raw_text(arxiv_id: str, source_url: str | None, pdf_url: str | None) -> tuple[str, str]:
-    """e-print → fallback PDF."""
+    """e-print → fallback PDF. Brak obu źródeł → SourceUnavailableError."""
+    base_id = normalize_arxiv_id(arxiv_id)
+    src = source_url_for(base_id, source_url)
+    pdf = pdf_url_for(base_id, pdf_url)
+
     try:
-        src = source_url_for(arxiv_id, source_url)
-        storage_path, raw = download_and_extract_tex(src, arxiv_id)
+        storage_path, raw = download_and_extract_tex(src, base_id)
         if raw.strip():
             return storage_path, raw
-        logger.warning("[%s] Pusty e-print, próbuję PDF...", arxiv_id)
+        logger.warning("[%s] Pusty e-print, próbuję PDF...", base_id)
+    except SourceUnavailableError as e:
+        logger.warning("[%s] e-print niedostępny: %s — PDF fallback", base_id, e)
     except Exception as e:
-        logger.warning("[%s] e-print nieudany: %s — PDF fallback", arxiv_id, e)
+        logger.warning("[%s] e-print nieudany: %s — PDF fallback", base_id, e)
 
-    pdf = pdf_url_for(arxiv_id, pdf_url)
-    storage_path, raw = extract_text_from_pdf(pdf, arxiv_id)
-    return storage_path, raw
+    try:
+        return extract_text_from_pdf(pdf, base_id)
+    except SourceUnavailableError:
+        raise
+    except Exception as e:
+        raise SourceUnavailableError(
+            f"Brak tekstu po e-print i PDF dla {base_id}: {e}"
+        ) from e

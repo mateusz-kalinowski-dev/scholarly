@@ -3,12 +3,16 @@ import logging
 import time
 
 import pika
+import requests
 
 from chunking import TextChunk, build_chunks
 from config import POSTGRES_URL, RABBITMQ_PREFETCH, RABBITMQ_URL
+from arxiv_ids import normalize_arxiv_id
 from db import (
     get_paper_fields,
     mark_failed,
+    mark_source_unavailable,
+    paper_is_skipped,
     save_chunks,
     save_paper_embeddings,
     update_chunk_embeddings_bulk,
@@ -16,12 +20,30 @@ from db import (
     upsert_paper_metadata,
 )
 from embeddings import embed_texts, maybe_refresh_ivfflat_index, wait_for_ollama_models
-from ingestion import fetch_raw_text
+from ingestion import SourceUnavailableError, fetch_raw_text
 from parsing import analyze_document, parse_sections
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+def _should_requeue(exc: BaseException) -> bool:
+    """Tylko błędy przejściowe wracają do kolejki (sieć/Ollama). 404/410 nigdy."""
+    if isinstance(exc, SourceUnavailableError):
+        return False
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        if 400 <= exc.response.status_code < 500:
+            return False
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return True
+    if isinstance(exc, requests.RequestException):
+        return True
+    msg = str(exc).lower()
+    return any(
+        k in msg
+        for k in ("timeout", "connection", "ollama", "rabbitmq", "temporarily")
+    )
 
 
 def _embed_paper_and_chunks(
@@ -73,6 +95,7 @@ def _embed_paper_and_chunks(
 
 def process_message(ch, method, properties, body):
     data = json.loads(body)
+    data["id"] = normalize_arxiv_id(data["id"])
     arxiv_id = data["id"]
     t_paper = time.perf_counter()
     logger.info("[%s] Start pipeline", arxiv_id)
@@ -81,9 +104,14 @@ def process_message(ch, method, properties, body):
     stage = "parsing"
 
     try:
+        if paper_is_skipped(arxiv_id):
+            logger.info("[%s] Pominięto — brak źródła (parsing FAILED)", arxiv_id)
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+            return
+
         result = upsert_paper_metadata(data)
         if not result:
-            logger.info("[%s] Pominięto — już w bazie (DONE)", arxiv_id)
+            logger.info("[%s] Pominięto — DONE lub brak źródła w Postgres", arxiv_id)
             ch.basic_ack(delivery_tag=method.delivery_tag)
             return
         paper_id, arxiv_id, should_process = result
@@ -91,6 +119,8 @@ def process_message(ch, method, properties, body):
             logger.info("[%s] Pominięto — embedding już DONE", arxiv_id)
             ch.basic_ack(delivery_tag=method.delivery_tag)
             return
+
+        logger.info("[%s] Metadane w Postgres (id=%s)", arxiv_id, paper_id)
 
         storage_path, raw_text = fetch_raw_text(
             arxiv_id, data.get("source_url"), data.get("pdf_url")
@@ -140,7 +170,26 @@ def process_message(ch, method, properties, body):
 
     except Exception as e:
         logger.exception("[%s] Błąd pipeline (%s): %s", arxiv_id, stage, e)
+        if isinstance(e, SourceUnavailableError) or (
+            isinstance(e, requests.HTTPError)
+            and e.response is not None
+            and e.response.status_code in (404, 410)
+        ):
+            mark_source_unavailable(arxiv_id)
+            logger.warning("[%s] ACK — brak źródła arXiv, pomijam na stałe", arxiv_id)
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+            return
         mark_failed(arxiv_id, stage)
+        if _should_requeue(e):
+            logger.warning("[%s] Requeue (błąd przejściowy)", arxiv_id)
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+        else:
+            logger.warning(
+                "[%s] ACK bez requeue (błąd trwały) — użyj requeue_incomplete.py",
+                arxiv_id,
+            )
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+        return
 
     ch.basic_ack(delivery_tag=method.delivery_tag)
 
