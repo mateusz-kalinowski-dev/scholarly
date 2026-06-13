@@ -7,6 +7,11 @@ backups/**/*.dump
 backups/**/*.meta.txt
 backups/**/*_meta.txt
 
+# Golden QA — wygenerowane artefakty eval (regenerowalne z notebooków)
+Golden_QA/output/*.csv
+Golden_QA/output/*.jsonl
+!Golden_QA/output/.gitkeep
+
 node_modules/
 dist/
 .env
