@@ -33,6 +33,8 @@ INITIAL_LOOKBACK_DAYS = int(os.getenv("INITIAL_LOOKBACK_DAYS", "30"))
 # Po zakończonym cyklu — krótka przerwa, potem kolejny cykl jeśli backfill nie skończony
 SCRAPER_INTERVAL_SECONDS = int(os.getenv("SCRAPER_INTERVAL_SECONDS", "120"))
 ARXIV_MAX_RETRIES = int(os.getenv("ARXIV_MAX_RETRIES", "6"))
+# arXiv API zwykle odmawia przy start>=10000 (HTTP 500) — dalej tylko incremental od góry
+ARXIV_MAX_START_OFFSET = int(os.getenv("ARXIV_MAX_START_OFFSET", "10000"))
 # Co ile wrzuconych na kolejkę zapisujemy checkpoint (Postgres i tak deduplikuje po arxiv_id)
 CHECKPOINT_COMMIT_EVERY = int(os.getenv("CHECKPOINT_COMMIT_EVERY", "25"))
 # Przy starcie kontenera: usuń checkpoint i wymuś backfill od INITIAL_LOOKBACK_DAYS

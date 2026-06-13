@@ -17,4 +17,82 @@
   #root {
     min-height: 100vh;
   }
+
+  /* Odpowiedzi chatu: markdown + KaTeX */
+  .markdown-answer {
+    @apply text-sm leading-relaxed text-zinc-200;
+  }
+
+  .markdown-answer > :first-child {
+    margin-top: 0;
+  }
+
+  .markdown-answer > :last-child {
+    margin-bottom: 0;
+  }
+
+  .markdown-answer p {
+    @apply my-3;
+  }
+
+  .markdown-answer h1,
+  .markdown-answer h2,
+  .markdown-answer h3,
+  .markdown-answer h4 {
+    @apply mt-5 mb-2 font-semibold text-zinc-100;
+  }
+
+  .markdown-answer h1 {
+    @apply text-lg;
+  }
+
+  .markdown-answer h2 {
+    @apply text-base;
+  }
+
+  .markdown-answer h3,
+  .markdown-answer h4 {
+    @apply text-sm;
+  }
+
+  .markdown-answer ul,
+  .markdown-answer ol {
+    @apply my-3 ml-5 space-y-1;
+  }
+
+  .markdown-answer ul {
+    @apply list-disc;
+  }
+
+  .markdown-answer ol {
+    @apply list-decimal;
+  }
+
+  .markdown-answer li {
+    @apply pl-1;
+  }
+
+  .markdown-answer strong {
+    @apply font-semibold text-zinc-100;
+  }
+
+  .markdown-answer blockquote {
+    @apply my-3 border-l-2 border-violet-500/40 pl-4 text-zinc-400 italic;
+  }
+
+  .markdown-answer pre {
+    @apply my-3 overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950 p-3 text-xs;
+  }
+
+  .markdown-answer pre code {
+    @apply bg-transparent p-0 text-zinc-300;
+  }
+
+  .markdown-answer .katex-display {
+    @apply my-4 overflow-x-auto overflow-y-hidden py-1;
+  }
+
+  .markdown-answer .katex {
+    @apply text-zinc-100;
+  }
 }

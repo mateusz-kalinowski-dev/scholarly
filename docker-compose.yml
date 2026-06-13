@@ -35,6 +35,7 @@ x-processor: &processor
 
 services:
   # ── Infrastructure ───────────────────────────────────────────────────────────
+  # v1 — zachowana baza (backup przed migracją); MinIO bez zmian
   postgres:
     container_name: postgres_db
     image: pgvector/pgvector:pg17
@@ -52,6 +53,29 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - app-network
+
+  # v2 — ParadeDB: pg_search (BM25) + pgvector 1024d, parent-child chunks
+  postgres_v2:
+    container_name: postgres_v2
+    image: paradedb/paradedb:latest
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: papers_db_v2
+    ports:
+      - "5445:5432"
+    volumes:
+      # ParadeDB / PG 18+: dane w podkatalogu wersji pod /var/lib/postgresql
+      - postgres_data_v3:/var/lib/postgresql
+      - ./services/postgres_new/init.sql:/docker-entrypoint-initdb.d/01_init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d papers_db_v2"]
+      interval: 5s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
     networks:
       - app-network
 
@@ -100,7 +124,7 @@ services:
     environment:
       # Równoległe żądania embed/chat (3 procesory + API)
       OLLAMA_NUM_PARALLEL: 4
-      OLLAMA_MAX_LOADED_MODELS: 2
+      OLLAMA_MAX_LOADED_MODELS: 3
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
@@ -130,7 +154,7 @@ services:
       OLLAMA_HOST: http://ollama:11434
     entrypoint: ["/bin/sh", "-c"]
     command:
-      - "ollama show gemma4:e2b || ollama pull gemma4:e2b; ollama show nomic-embed-text || ollama pull nomic-embed-text"
+      - "ollama show gemma4:e2b || ollama pull gemma4:e2b; ollama show nomic-embed-text || ollama pull nomic-embed-text; ollama show bge-m3 || ollama pull bge-m3"
     restart: "no"
     networks:
       - app-network
@@ -212,6 +236,35 @@ services:
       - app-network
     restart: unless-stopped
 
+  keybert-backfill:
+    build:
+      context: ./services/processor
+      dockerfile: Dockerfile.keybert
+    environment:
+      POSTGRES_V2_URL: postgresql://admin:admin@postgres_v2:5432/papers_db_v2
+      KEYBERT_MODEL: BAAI/bge-small-en-v1.5
+      KEYBERT_BATCH: 512
+      KEYBERT_ENCODE_BATCH: 768
+      KEYBERT_FAST_BATCH: 4096
+      KEYBERT_DEVICE: cuda
+      KEYBERT_FP16: "1"
+    volumes:
+      - hf_cache:/cache/huggingface
+    depends_on:
+      postgres_v2:
+        condition: service_healthy
+    networks:
+      - app-network
+    profiles:
+      - keybert
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
   api:
     container_name: fastapi
     build:
@@ -221,14 +274,33 @@ services:
       - "8000:8000"
     environment:
       POSTGRES_URL: postgresql://admin:admin@postgres:5432/papers_db
+      POSTGRES_V2_URL: postgresql://admin:admin@postgres_v2:5432/papers_db_v2
       OLLAMA_BASE_URL: http://ollama:11434
       EMBED_MODEL: nomic-embed-text
+      EMBED_MODEL_V2: bge-m3
       LLM_MODEL: gemma4:e2b
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
+      RERANK_ENABLED: "true"
+      RERANK_MODEL: BAAI/bge-reranker-v2-m3
+      RERANK_TOP_N: "50"
+      RERANK_MIN_SCORE: "0.3"
+      HYBRID_CANDIDATE_MULTIPLIER: "20"
+      HYBRID_CHILD_RECALL_MIN: "100"
+      HYBRID_CHILD_RECALL_MAX: "100"
+      ANCHOR_CHILD_QUOTA: "25"
+      LLM_CONTEXT_TOP_K: "8"
+      SEARCH_RESULT_MAX: "20"
+      SELF_RAG_ENABLED: "true"
+      SELF_RAG_POST_GEN_ENABLED: "true"
+      SELF_RAG_MIN_CONFIDENCE: "0.45"
+    volumes:
+      - hf_cache:/cache/huggingface
     depends_on:
       postgres:
+        condition: service_healthy
+      postgres_v2:
         condition: service_healthy
       ollama:
         condition: service_healthy
@@ -240,6 +312,8 @@ services:
 
 volumes:
   postgres_data_v2:
+  postgres_data_v3:
+  hf_cache:
   redis_data:
   minio_data:
   ollama_data:

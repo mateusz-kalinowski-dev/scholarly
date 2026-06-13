@@ -11,6 +11,7 @@ from arxiv_ids import normalize_arxiv_id
 from arxiv_query import build_search_query
 from config import (
     ARXIV_MAX_PAGES_PER_RUN,
+    ARXIV_MAX_START_OFFSET,
     ARXIV_PAGE_SIZE,
     BACKFILL_CURSOR_KEY,
     BACKFILL_DONE_KEY,
@@ -46,6 +47,23 @@ def connect_rabbitmq():
             time.sleep(5)
 
 
+def finalize_backfill(reason: str) -> None:
+    """Kończy paginację wstecz — nowe prace idą przez incremental (start=0)."""
+    r_client.set(BACKFILL_DONE_KEY, "1")
+    r_client.delete(BACKFILL_CURSOR_KEY)
+    logger.info("Backfill zakończony: %s → tryb incremental", reason)
+
+
+def maybe_finalize_stuck_backfill() -> None:
+    if r_client.get(BACKFILL_DONE_KEY) == "1":
+        return
+    cursor = int(r_client.get(BACKFILL_CURSOR_KEY) or 0)
+    if cursor >= ARXIV_MAX_START_OFFSET:
+        finalize_backfill(
+            f"kursor {cursor} >= limit arXiv ({ARXIV_MAX_START_OFFSET})"
+        )
+
+
 def reset_for_month_backfill() -> None:
     """Czyści checkpoint i kursory — backfill od INITIAL_LOOKBACK_DAYS."""
     deleted = r_client.delete(
@@ -66,6 +84,7 @@ class CheckpointTracker:
 
     def __init__(self) -> None:
         self.newest: str | None = r_client.get(CHECKPOINT_KEY)
+        self._last_committed: str | None = self.newest
         self._since_commit = 0
 
     def note(self, published: str) -> None:
@@ -76,9 +95,10 @@ class CheckpointTracker:
             self.flush()
 
     def flush(self) -> None:
-        if self.newest:
+        if self.newest and self.newest != self._last_committed:
             r_client.set(CHECKPOINT_KEY, self.newest)
             logger.info("Checkpoint -> %s", self.newest)
+            self._last_committed = self.newest
         self._since_commit = 0
 
 
@@ -156,14 +176,18 @@ def run_backfill(channel, cutoff: datetime, tracker: CheckpointTracker) -> int:
         feed = fetch_page(query, start=start, max_results=ARXIV_PAGE_SIZE)
         if not feed or not feed.entries:
             if feed is None:
-                logger.warning(
-                    "Backfill: błąd API start=%s — kursor bez zmian",
-                    start,
-                )
+                if start >= ARXIV_MAX_START_OFFSET:
+                    finalize_backfill(
+                        f"HTTP błąd przy start={start} (limit paginacji arXiv)"
+                    )
+                else:
+                    logger.warning(
+                        "Backfill: błąd API start=%s — kursor bez zmian",
+                        start,
+                    )
                 break
             logger.info("Backfill: koniec wyników na start=%s", start)
-            r_client.set(BACKFILL_DONE_KEY, "1")
-            r_client.delete(BACKFILL_CURSOR_KEY)
+            finalize_backfill(f"brak wyników na start={start}")
             break
 
         reached_cutoff = False
@@ -178,14 +202,12 @@ def run_backfill(channel, cutoff: datetime, tracker: CheckpointTracker) -> int:
 
         if reached_cutoff:
             logger.info("Backfill: cutoff %s osiągnięty", cutoff.date())
-            r_client.set(BACKFILL_DONE_KEY, "1")
-            r_client.delete(BACKFILL_CURSOR_KEY)
+            finalize_backfill(f"osiągnięto cutoff {cutoff.date()}")
             break
 
         if len(feed.entries) < ARXIV_PAGE_SIZE:
             logger.info("Backfill: ostatnia strona API")
-            r_client.set(BACKFILL_DONE_KEY, "1")
-            r_client.delete(BACKFILL_CURSOR_KEY)
+            finalize_backfill("ostatnia strona wyników")
             break
 
         start += ARXIV_PAGE_SIZE
@@ -254,6 +276,8 @@ def run_scraper():
 
     if SCRAPER_RESET_ON_START:
         reset_for_month_backfill()
+    else:
+        maybe_finalize_stuck_backfill()
 
     connection, channel = connect_rabbitmq()
     tracker = CheckpointTracker()
