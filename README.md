@@ -27,11 +27,40 @@ Skopiuj pliki `.env.example` → `.env` w katalogach, których używasz:
 
 | Katalog | Po co |
 |---------|--------|
+| `.env` (root) | `OPENAI_API_KEY` — docker compose + DeepEval (opcjonalnie) |
 | `evaluation/` | batch eval, Ragas, DeepEval |
 | `Golden_QA/` | `GEMINI_API_KEY` |
-| `.env` (root) | opcjonalnie `OPENAI_API_KEY` dla API / DeepEval |
+| `fastapi/` | tylko przy lokalnym uruchomieniu API poza compose (domyślnie compose nadpisuje) |
 
 Domyślne wartości w compose działają bez zmian dla Postgres, Ollama i MinIO.
+
+### Pełny flow badawczy
+
+Kolejność pracy od zera do metryk:
+
+```
+1. Ingestia          scraper → RabbitMQ → processor (×3)
+                     PDF → MinIO → parent-child chunking → embedding bge-m3 → Postgres (tabela chunks)
+2. Indeksowanie      auto co 25 prac (SEARCH_INDEX_EVERY_N_PAPERS) LUB ręcznie:
+                     rechunk.py --build-indexes / rebuild_indexes.py
+                     → indeksy HNSW/GIN/BM25 na tabeli chunks (warianty B1 + eksperymenty)
+3. Baseline 0        build_baseline0.py — OSOBNO, po zasileniu korpusu (processor tego nie robi):
+                     naiwny split ~1000 zn. → tabela baseline0_chunks → własny indeks HNSW
+                     (inna tabela i inny indeks niż w kroku 2; wymagane dla wariantu baseline0 w eval)
+4. (Opcj.) KeyBERT   docker compose --profile keybert run keybert-backfill
+5. Golden QA         generate_golden_dataset.ipynb → tabela golden_qa
+6. EDA               scholarly_eda.ipynb — statystyki korpusu (po Golden QA)
+7. Odpowiedzi API    evaluation/01 — 5 wariantów × golden_qa → evaluation_runs
+8. Metryki           03 offline (hit@k, MRR, IDK) + 02 Ragas (Ollama) + 04–05 DeepEval (GPT)
+                     + 07 latency + 08 istotność statystyczna
+```
+
+**Uwagi:**
+- Embedding odbywa się **w processorze** podczas ingestii — nie ma osobnego kroku po ingestii.
+- **Baseline 0 nie jest częścią ingestii** — processor robi wyłącznie parent-child (`chunks`). Naiwny chunk i indeks HNSW dla B0 budujesz ręcznie skryptem `build_baseline0.py` na końcu (gdy masz już teksty w MinIO).
+- Golden QA wymaga child chunków w Postgres; uruchamiaj po zebraniu wystarczającego korpusu.
+- Notebook **06** (pilot OpenAI Self-RAG) jest opcjonalny, poza główną ewaluacją pięciu wariantów.
+- Typowy flow metryk: `01` → `03` + (`02` lub `04`→`05`) → `07` → `08`.
 
 ### 2. Stack minimalny (ewaluacja RAG)
 
@@ -57,15 +86,17 @@ docker compose up -d scraper processor processor-2 processor-3
 docker compose up -d api
 ```
 
-**Baseline 0** (wariant ablacyjny) wymaga osobnej tabeli:
+**Baseline 0** — osobny krok po ingestii (processor go **nie** uruchamia):
+
+Processor zapisuje tylko parent-child do tabeli `chunks`. Wariant ablacyjny B0 korzysta z **innej** tabeli (`baseline0_chunks`) i **innego** indeksu HNSW (tylko vector search, naiwny split ~1000 znaków). Uruchom dopiero gdy korpus jest w MinIO/Postgres:
 
 ```bash
 docker compose run --rm processor python build_baseline0.py --ensure-schema
 docker compose run --rm processor python build_baseline0.py
-docker compose run --rm processor python build_baseline0.py --build-index
+docker compose run --rm processor python build_baseline0.py --build-index   # HNSW na baseline0_chunks
 ```
 
-**Indeksy wyszukiwania** (pierwszy raz lub po dużej zmianie danych):
+**Indeksy parent-child** (B1 + eksperymenty — tabela `chunks`, hybrid GIN/BM25/HNSW):
 
 ```bash
 docker compose run --rm processor python rechunk.py --build-indexes
@@ -74,8 +105,9 @@ docker compose run --rm processor python rechunk.py --build-indexes
 ### 4. Zatrzymanie
 
 ```bash
-docker compose down          # kontenery
-docker compose down -v       # + wolumeny (usuwa bazę!)
+docker compose down              # zatrzymuje kontenery (dane w volume zostają)
+docker compose down --remove-orphans   # usuwa osierocone kontenery po rename serwisów
+# UWAGA: docker compose down -v usuwa wolumeny — traci się bazę Postgres!
 ```
 
 ---
@@ -227,6 +259,7 @@ Wyniki zapisywane do Postgres (`evaluation_runs`) i/lub `evaluation/output/` (gi
 
 ```
 scholarly/
+├── .env.example          # OPENAI (compose)
 ├── docker-compose.yml
 ├── fastapi/              # API research
 ├── services/

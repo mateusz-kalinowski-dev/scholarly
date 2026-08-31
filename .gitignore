@@ -61,6 +61,8 @@ dist-ssr
 !.vscode/extensions.json
 .idea
 .DS_Store
+Thumbs.db
+desktop.ini
 *.suo
 *.ntvs*
 *.njsproj
@@ -128,9 +130,10 @@ instance/
 .scrapy
 
 
-# IPython
+# IPython / Jupyter
 profile_default/
 ipython_config.py
+.ipynb_checkpoints/
 
 .python-version
 Pipfile.lock

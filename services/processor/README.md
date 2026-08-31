@@ -8,7 +8,17 @@ Worker RabbitMQ: metadane → PDF/e-print → MinIO → parent-child chunking �
 docker compose up -d processor processor-2 processor-3
 ```
 
-Entrypoint: `processor.py` (kolejka `paper_tasks`).
+Entrypoint: `processor.py` (kolejka `paper_tasks`) — **tylko parent-child** → tabela `chunks`.
+
+## Baseline 0 (osobny pipeline)
+
+`build_baseline0.py` **nie** jest częścią workera RabbitMQ. Uruchamiasz go ręcznie po zasileniu korpusu:
+
+1. Czyta surowy tekst z MinIO (już zapisany przez ingest).
+2. Dzieli naiwnie (`recursive_character_split`, ~1000 znaków) → tabela `baseline0_chunks`.
+3. Embeduje chunki (`bge-m3`) i buduje **osobny** indeks HNSW (`--build-index`).
+
+To inna tabela i inny indeks niż `rechunk.py --build-indexes` / `rebuild_indexes.py`, które dotyczą parent-child w `chunks`.
 
 ## Struktura
 
@@ -31,7 +41,7 @@ processor/
 | `rechunk.py` | Reprocess jednej pracy (`--arxiv-id`) lub pierwsze indeksy (`--build-indexes`) |
 | `rebuild_indexes.py` | Przebudowa HNSW / GIN / BM25 po masowym backfillu KeyBERT |
 | `backfill_keywords_keybert.py` | Uzupełnienie `keywords_keybert` (profil `keybert` w compose) |
-| `build_baseline0.py` | Budowa `baseline0_chunks` — **wymagane** dla wariantu B0 w `evaluation/01` |
+| `build_baseline0.py` | **Osobno po ingestii** — naiwny chunk → `baseline0_chunks` + własny HNSW (nie `chunks`; wymagane dla B0 w eval) |
 
 Przykłady:
 
