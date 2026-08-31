@@ -3,19 +3,18 @@ x-processor: &processor
     context: ./services/processor
   env_file: ./services/processor/.env.example
   environment:
-    POSTGRES_URL: postgresql://admin:admin@postgres:5432/papers_db
+    POSTGRES_URL: postgresql://admin:admin@postgres:5432/papers_db_v2
     MINIO_ENDPOINT: minio:9000
     MINIO_ACCESS_KEY: minioadmin
     MINIO_SECRET_KEY: minioadmin
     RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
     REDIS_URL: redis://redis:6379
     LLM_BASE_URL: http://ollama:11434
-    EMBED_MODEL: nomic-embed-text
-    EMBED_BATCH_SIZE: 32
+    EMBED_MODEL: bge-m3
+    EMBED_BATCH_SIZE: 16
     EMBED_REQUEST_TIMEOUT: 300
     RABBITMQ_PREFETCH: 1
-    IVFFLAT_INDEX_EVERY_N_PAPERS: 25
-    IVFFLAT_MIN_CHUNKS: 100
+    SEARCH_INDEX_EVERY_N_PAPERS: 25
   depends_on:
     postgres:
       condition: service_healthy
@@ -35,30 +34,8 @@ x-processor: &processor
 
 services:
   # ── Infrastructure ───────────────────────────────────────────────────────────
-  # v1 — zachowana baza (backup przed migracją); MinIO bez zmian
   postgres:
-    container_name: postgres_db
-    image: pgvector/pgvector:pg17
-    environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: admin
-      POSTGRES_DB: papers_db
-    ports:
-      - "5444:5432"
-    volumes:
-      - postgres_data_v2:/var/lib/postgresql/data
-      - ./services/postgres_vector/init.sql:/docker-entrypoint-initdb.d/init.sql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U admin -d papers_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      - app-network
-
-  # v2 — ParadeDB: pg_search (BM25) + pgvector 1024d, parent-child chunks
-  postgres_v2:
-    container_name: postgres_v2
+    container_name: postgres
     image: paradedb/paradedb:latest
     environment:
       POSTGRES_USER: admin
@@ -67,9 +44,9 @@ services:
     ports:
       - "5445:5432"
     volumes:
-      # ParadeDB / PG 18+: dane w podkatalogu wersji pod /var/lib/postgresql
       - postgres_data_v3:/var/lib/postgresql
-      - ./services/postgres_new/init.sql:/docker-entrypoint-initdb.d/01_init.sql
+      - ./services/postgres/init.sql:/docker-entrypoint-initdb.d/01_init.sql
+      - ./services/postgres/migrations:/migrations:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin -d papers_db_v2"]
       interval: 5s
@@ -122,9 +99,9 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     environment:
-      # Równoległe żądania embed/chat (3 procesory + API)
-      OLLAMA_NUM_PARALLEL: 4
-      OLLAMA_MAX_LOADED_MODELS: 3
+      OLLAMA_NUM_PARALLEL: 2
+      OLLAMA_MAX_LOADED_MODELS: 2
+      OLLAMA_KEEP_ALIVE: -1
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
@@ -141,7 +118,6 @@ services:
               count: 1
               capabilities: [gpu]
 
-  # Jednorazowy pull modeli do wolumenu (pomija jesli juz sa)
   ollama-init:
     container_name: ollama_init
     image: ollama/ollama:latest
@@ -154,7 +130,7 @@ services:
       OLLAMA_HOST: http://ollama:11434
     entrypoint: ["/bin/sh", "-c"]
     command:
-      - "ollama show gemma4:e2b || ollama pull gemma4:e2b; ollama show nomic-embed-text || ollama pull nomic-embed-text; ollama show bge-m3 || ollama pull bge-m3"
+      - "ollama show gemma4:e2b || ollama pull gemma4:e2b; ollama show bge-m3 || ollama pull bge-m3"
     restart: "no"
     networks:
       - app-network
@@ -187,7 +163,7 @@ services:
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       REDIS_URL: redis://redis:6379
-      POSTGRES_URL: postgresql://admin:admin@postgres:5432/papers_db
+      POSTGRES_URL: postgresql://admin:admin@postgres:5432/papers_db_v2
       ARXIV_PAGE_SIZE: 200
       ARXIV_REQUEST_DELAY: 5.0
       ARXIV_MAX_RETRIES: 6
@@ -207,7 +183,6 @@ services:
       - app-network
     restart: unless-stopped
 
-  # 3 równoległe workery (RabbitMQ round-robin)
   processor:
     <<: *processor
 
@@ -217,31 +192,12 @@ services:
   processor-3:
     <<: *processor
 
-  frontend:
-    container_name: frontend
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile.dev
-    ports:
-      - "5173:5173"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    environment:
-      VITE_API_URL: ""
-      VITE_PROXY_TARGET: http://api:8000
-    depends_on:
-      - api
-    networks:
-      - app-network
-    restart: unless-stopped
-
   keybert-backfill:
     build:
       context: ./services/processor
       dockerfile: Dockerfile.keybert
     environment:
-      POSTGRES_V2_URL: postgresql://admin:admin@postgres_v2:5432/papers_db_v2
+      POSTGRES_URL: postgresql://admin:admin@postgres:5432/papers_db_v2
       KEYBERT_MODEL: BAAI/bge-small-en-v1.5
       KEYBERT_BATCH: 512
       KEYBERT_ENCODE_BATCH: 768
@@ -251,7 +207,7 @@ services:
     volumes:
       - hf_cache:/cache/huggingface
     depends_on:
-      postgres_v2:
+      postgres:
         condition: service_healthy
     networks:
       - app-network
@@ -273,11 +229,10 @@ services:
     ports:
       - "8000:8000"
     environment:
-      POSTGRES_URL: postgresql://admin:admin@postgres:5432/papers_db
-      POSTGRES_V2_URL: postgresql://admin:admin@postgres_v2:5432/papers_db_v2
+      POSTGRES_URL: postgresql://admin:admin@postgres:5432/papers_db_v2
       OLLAMA_BASE_URL: http://ollama:11434
-      EMBED_MODEL: nomic-embed-text
-      EMBED_MODEL_V2: bge-m3
+      EMBED_MODEL: bge-m3
+      EMBED_DIM: "1024"
       LLM_MODEL: gemma4:e2b
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: minioadmin
@@ -293,14 +248,23 @@ services:
       LLM_CONTEXT_TOP_K: "8"
       SEARCH_RESULT_MAX: "20"
       SELF_RAG_ENABLED: "true"
-      SELF_RAG_POST_GEN_ENABLED: "true"
+      SELF_RAG_POST_GEN_ENABLED: "false"
       SELF_RAG_MIN_CONFIDENCE: "0.45"
+      PROFILE_RAG_TIMING: "true"
+      RERANK_DEVICE: cuda
+      RERANK_BATCH_SIZE: "64"
+      LLM_MAX_CONTEXT_CHARS: "96000"
+      LLM_NUM_CTX: "32768"
+      RAG_CHILD_MAX_CHARS: "12000"
+      RAG_PARENT_MAX_CHARS: "12000"
+      RERANK_MAX_CHARS: "8000"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_CHAT_MODEL: ${OPENAI_CHAT_MODEL:-gpt-4o-mini}
     volumes:
       - hf_cache:/cache/huggingface
     depends_on:
       postgres:
-        condition: service_healthy
-      postgres_v2:
         condition: service_healthy
       ollama:
         condition: service_healthy
@@ -309,9 +273,15 @@ services:
     networks:
       - app-network
     restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
 volumes:
-  postgres_data_v2:
   postgres_data_v3:
   hf_cache:
   redis_data:

@@ -12,11 +12,13 @@ QUERIES = [
         SELECT parsing_status, COUNT(*) FROM papers
         GROUP BY parsing_status ORDER BY COUNT(*) DESC
     """),
-    ("chunki z embeddingiem", """
-        SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL
+    ("chunki child z embeddingiem", """
+        SELECT COUNT(*) FROM chunks
+        WHERE chunk_role = 'child' AND embedding IS NOT NULL
     """),
-    ("chunki bez embeddingu", """
-        SELECT COUNT(*) FROM chunks WHERE embedding IS NULL
+    ("chunki child bez embeddingu", """
+        SELECT COUNT(*) FROM chunks
+        WHERE chunk_role = 'child' AND embedding IS NULL
     """),
 ]
 

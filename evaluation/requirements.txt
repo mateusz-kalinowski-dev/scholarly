@@ -1,0 +1,29 @@
+# Ewaluacja końcowa — wspólne z Golden_QA
+httpx>=0.27
+pandas>=2.0
+python-dotenv>=1.0
+sqlalchemy>=2.0
+psycopg[binary]>=3.1
+tqdm>=4.66
+jupyter>=1.0
+ipywidgets>=8.0
+
+# Ragas (notebook 02)
+ragas>=0.2
+datasets>=2.14
+langchain-community>=0.3
+langchain-ollama>=0.2
+
+# Wykresy (notebook 03–04)
+matplotlib>=3.8
+seaborn>=0.13
+numpy>=1.26
+
+# Notebook 03 — analiza offline
+scipy>=1.11
+tabulate>=0.9
+Pillow>=10.0
+
+# DeepEval + OpenAI (notebook 04)
+deepeval>=2.0
+openai>=1.40

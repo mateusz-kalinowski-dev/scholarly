@@ -1,3 +1,6 @@
+# Lokalne dokumenty pracy magisterskiej (poza repo)
+docs/
+
 # Postgres / DB backups (local only — never commit)
 backups/
 *.dump
@@ -7,10 +10,35 @@ backups/**/*.dump
 backups/**/*.meta.txt
 backups/**/*_meta.txt
 
-# Golden QA — wygenerowane artefakty eval (regenerowalne z notebooków)
-Golden_QA/output/*.csv
-Golden_QA/output/*.jsonl
+# Golden QA — wygenerowane artefakty (regenerowalne)
+Golden_QA/output/*
 !Golden_QA/output/.gitkeep
+Golden_QA/__pycache__/
+
+# EDA — wygenerowane tabele i wykresy (regenerowalne z scholarly_eda.ipynb)
+EDA/figures/*
+!EDA/figures/.gitkeep
+EDA/tables/*
+!EDA/tables/.gitkeep
+EDA/eda_summary.csv
+EDA/*.json
+
+# Evaluation — wygenerowane artefakty (regenerowalne z notebooków 01–08)
+evaluation/output/analysis/
+evaluation/output/runs/
+evaluation/output/openai_pilot/
+evaluation/output/deepeval/*
+!evaluation/output/deepeval/.gitkeep
+evaluation/output/latency/*
+!evaluation/output/latency/.gitkeep
+evaluation/output/ragas/*
+!evaluation/output/ragas/.gitkeep
+
+# Evaluation — cache DeepEval / Confident AI
+evaluation/.deepeval/
+
+# Tymczasowe pliki robocze notebooków
+evaluation/_*.txt
 
 node_modules/
 dist/

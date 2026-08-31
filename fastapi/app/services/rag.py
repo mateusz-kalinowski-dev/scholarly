@@ -1,12 +1,12 @@
 import httpx
 
-from app.config import LLM_MAX_CONTEXT_CHARS, LLM_MODEL, OLLAMA_BASE_URL
+from app.config import LLM_MAX_CONTEXT_CHARS, LLM_MODEL, LLM_NUM_CTX, OLLAMA_BASE_URL
 from app.schemas import SearchHit, SourceChunk, SourcePaper
 
 # Exact phrase when retrieval context is irrelevant (aligned with RAGAS / golden QA runs).
 IDK_ANSWER = "I do not know."
 
-LLM_OPTIONS = {"num_ctx": 8192, "temperature": 0}
+LLM_OPTIONS = {"num_ctx": LLM_NUM_CTX, "temperature": 0}
 
 RAG_SYSTEM_PROMPT = """You are Scholarly, a scientific Q&A assistant for arXiv CS papers.
 
@@ -148,6 +148,13 @@ def build_llm_only_prompt(
 
 
 async def generate_chat(system: str, user: str) -> str:
+    from app.services.llm_backend import get_llm_backend
+
+    if get_llm_backend() == "openai":
+        from app.services.openai_llm import openai_chat
+
+        return await openai_chat(system, user)
+
     payload = {
         "model": LLM_MODEL,
         "messages": [
@@ -176,7 +183,14 @@ async def generate_chat(system: str, user: str) -> str:
 
 
 async def generate_answer(prompt: str) -> str:
-    """Completion-style call for rewrite / translation helpers."""
+    """Completion-style call for rewrite / translation / Self-RAG helpers."""
+    from app.services.llm_backend import get_llm_backend
+
+    if get_llm_backend() == "openai":
+        from app.services.openai_llm import openai_completion
+
+        return await openai_completion(prompt)
+
     payload = {
         "model": LLM_MODEL,
         "prompt": prompt,

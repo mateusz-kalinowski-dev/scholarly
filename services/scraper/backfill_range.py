@@ -11,7 +11,7 @@ from arxiv_client import fetch_page
 from arxiv_query import build_search_query
 from config import ARXIV_PAGE_SIZE, RABBITMQ_URL
 from dedup import seen_count
-from scraper2 import entry_to_paper_data, publish_paper
+from scraper import entry_to_paper_data, publish_paper
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"

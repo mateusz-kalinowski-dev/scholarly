@@ -5,23 +5,25 @@ import time
 import pika
 import requests
 
-from chunking import TextChunk, build_chunks
-from config import POSTGRES_URL, RABBITMQ_PREFETCH, RABBITMQ_URL
 from arxiv_ids import normalize_arxiv_id
-from db import (
-    get_paper_fields,
+from config import EMBED_MODEL, RABBITMQ_PREFETCH, RABBITMQ_URL
+from ingestion import SourceUnavailableError, fetch_raw_text
+from pipeline.chunking import build_parent_child_chunks
+from pipeline.db import (
+    list_child_contents,
     mark_failed,
     mark_source_unavailable,
+    maybe_refresh_search_indexes,
     paper_is_skipped,
-    save_chunks,
-    save_paper_embeddings,
-    update_chunk_embeddings_bulk,
+    save_parent_child_chunks,
+    update_child_embeddings,
     update_paper_after_ingest,
+    update_paper_embeddings,
     upsert_paper_metadata,
 )
-from embeddings import embed_texts, maybe_refresh_ivfflat_index, wait_for_ollama_models
-from ingestion import SourceUnavailableError, fetch_raw_text
-from parsing import analyze_document, parse_sections
+from pipeline.embeddings import embed_texts, wait_for_ollama_models
+from pipeline.parsing import parse_sections
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
@@ -44,53 +46,6 @@ def _should_requeue(exc: BaseException) -> bool:
         k in msg
         for k in ("timeout", "connection", "ollama", "rabbitmq", "temporarily")
     )
-
-
-def _embed_paper_and_chunks(
-    paper_id: str,
-    arxiv_id: str,
-    title: str,
-    summary: str | None,
-    chunk_ids: list[str],
-    chunks: list[TextChunk],
-) -> None:
-    texts: list[str] = [title]
-    has_summary = bool(summary and summary.strip())
-    if has_summary:
-        texts.append(summary)
-    texts.extend(ch.content for ch in chunks)
-
-    t0 = time.perf_counter()
-    vectors = embed_texts(texts)
-    logger.info(
-        "[%s] Embeddingi (%d tekstów, batch) w %.1fs",
-        arxiv_id,
-        len(texts),
-        time.perf_counter() - t0,
-    )
-
-    title_emb = vectors[0]
-    if not title_emb:
-        raise ValueError("Nie udało się wyembedować tytułu")
-
-    offset = 1
-    summary_emb = None
-    if has_summary:
-        summary_emb = vectors[1]
-        offset = 2
-
-    save_paper_embeddings(paper_id, title, summary or "", title_emb, summary_emb)
-
-    pairs: list[tuple[str, list[float]]] = []
-    for i, chunk_id in enumerate(chunk_ids):
-        emb = vectors[offset + i]
-        if emb:
-            pairs.append((chunk_id, emb))
-        else:
-            logger.warning("[%s] Brak wektora chunka %s", arxiv_id, chunk_id)
-
-    update_chunk_embeddings_bulk(pairs)
-    logger.info("[%s] Zapisano %d/%d embeddingów chunków", arxiv_id, len(pairs), len(chunks))
 
 
 def process_message(ch, method, properties, body):
@@ -128,39 +83,41 @@ def process_message(ch, method, properties, body):
         if not raw_text.strip():
             raise ValueError("Brak tekstu po e-print i PDF")
 
+        update_paper_after_ingest(arxiv_id, storage_path)
+
         sections = parse_sections(raw_text)
-        analysis = analyze_document(sections)
-        total_tokens = analysis["total_tokens"]
-        chunks = build_chunks(sections, total_tokens)
-        update_paper_after_ingest(arxiv_id, storage_path, total_tokens)
-        logger.info(
-            "[%s] Parsed: %d sekcji, ~%d tokenów, %d chunków",
-            arxiv_id,
-            analysis["section_count"],
-            total_tokens,
-            len(chunks),
-        )
+        title = data.get("title") or ""
+        parents = build_parent_child_chunks(sections, paper_title=title)
+        if not parents:
+            raise ValueError("Brak parent chunków")
 
-        if not chunks:
-            raise ValueError("Brak chunków po chunkingu")
-
-        chunk_ids = save_chunks(paper_id, chunks)
+        p_count, c_count = save_parent_child_chunks(paper_id, parents)
+        logger.info("[%s] Chunki: %d parent, %d child", arxiv_id, p_count, c_count)
 
         stage = "embedding"
-        fields = get_paper_fields(paper_id) or {
-            "title": data["title"],
-            "summary": data.get("summary_raw") or data.get("summary"),
-        }
-        _embed_paper_and_chunks(
-            paper_id,
-            arxiv_id,
-            fields["title"],
-            fields.get("summary"),
-            chunk_ids,
-            chunks,
-        )
+        children = list_child_contents(paper_id)
+        if not children:
+            raise ValueError("Brak child chunków")
 
-        maybe_refresh_ivfflat_index()
+        vectors = embed_texts([content for _, content in children])
+        pairs = [
+            (cid, emb)
+            for (cid, _), emb in zip(children, vectors)
+            if emb is not None
+        ]
+        if len(pairs) != len(children):
+            raise ValueError(f"Niepełne embeddingi child ({len(pairs)}/{len(children)})")
+        update_child_embeddings(pairs)
+        logger.info("[%s] Embeddingi child: %d", arxiv_id, len(pairs))
+
+        summary = data.get("summary_raw") or data.get("summary") or ""
+        title_vec = embed_texts([title])[0]
+        summary_vec = embed_texts([summary])[0] if summary.strip() else None
+        if not title_vec:
+            raise ValueError("Brak embeddingu tytułu")
+        update_paper_embeddings(paper_id, title_vec, summary_vec, EMBED_MODEL)
+
+        maybe_refresh_search_indexes()
 
         logger.info(
             "[%s] Pipeline OK w %.1fs",
@@ -216,5 +173,5 @@ def start_consuming():
 
 
 if __name__ == "__main__":
-    wait_for_ollama_models(["nomic-embed-text"])
+    wait_for_ollama_models(["bge-m3"])
     start_consuming()

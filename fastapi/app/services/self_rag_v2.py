@@ -4,12 +4,16 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 
 from psycopg import Connection
 
 from app.config import (
     ANCHOR_CHILD_QUOTA,
+    PROFILE_RAG_TIMING,
+    RAG_CHILD_MAX_CHARS,
+    RAG_PARENT_MAX_CHARS,
     RERANK_ENABLED,
     RERANK_MIN_SCORE,
     RERANK_TOP_N,
@@ -21,10 +25,11 @@ from app.config import (
     search_result_limit,
 )
 from app.schemas import RetrievalMetaV2, SearchHitV2
+from app.services.query_rewrite import QueryRewriteResult
 from app.services.rag import LLMError, generate_answer
 from app.services.reranker_v2 import filter_by_rerank_threshold, rerank_hits_v2
 from app.services.retrieval_v2 import (
-    anchor_terms_from_text,
+    FtsBackend,
     collapse_children_to_parents,
     merge_child_hits,
     search_hybrid_v2,
@@ -82,14 +87,30 @@ class FunnelStats:
     parent_candidates: int
     parents_reranked: int
     rerank_top_score: float | None
+    timings_ms: dict[str, float] = field(default_factory=dict)
+
+
+def _tick() -> float:
+    return time.perf_counter()
+
+
+def _ms(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000, 1)
 
 
 def _format_excerpts_for_grade(hits: list[SearchHitV2], limit: int) -> str:
     parts: list[str] = []
+    child_cap = min(RAG_CHILD_MAX_CHARS, 4000)
+    parent_cap = min(RAG_PARENT_MAX_CHARS, 4000)
     for i, hit in enumerate(hits[:limit], start=1):
         section = hit.section_name or "N/A"
-        preview = hit.content.replace("\n", " ")[:500]
-        parts.append(f"[{i}] {hit.arxiv_id} | {hit.title} | {section}\n{preview}")
+        child = hit.child_snippet.strip()[:child_cap]
+        parent = hit.content.strip()[:parent_cap]
+        parts.append(
+            f"[{i}] {hit.arxiv_id} | {hit.title} | {section}\n"
+            f"Matched child:\n{child}\n"
+            f"Parent context:\n{parent}"
+        )
     return "\n\n".join(parts) if parts else "(none)"
 
 
@@ -163,8 +184,7 @@ async def verify_answer_grounded_v2(
     return _parse_verify_json(raw)
 
 
-def _hits_cover_anchors(question: str, hits: list[SearchHitV2]) -> bool:
-    anchors = anchor_terms_from_text(question)
+def _hits_cover_anchors(anchors: list[str], hits: list[SearchHitV2]) -> bool:
     if not anchors:
         return True
     for hit in hits:
@@ -175,16 +195,15 @@ def _hits_cover_anchors(question: str, hits: list[SearchHitV2]) -> bool:
 
 
 def _boost_reranked_anchors(
-    question: str,
+    anchors: list[str],
     hits: list[SearchHitV2],
 ) -> list[SearchHitV2]:
-    anchors = anchor_terms_from_text(question)
     if not anchors:
         return hits
 
     def key(hit: SearchHitV2) -> tuple[int, float]:
-        title = (hit.title or "").lower()
-        matched = any(a.lower() in title for a in anchors)
+        blob = f"{hit.title} {hit.child_snippet} {hit.content}".lower()
+        matched = any(a.lower() in blob for a in anchors)
         return (1 if matched else 0, hit.rerank_score or hit.score)
 
     return sorted(hits, key=key, reverse=True)
@@ -196,28 +215,25 @@ def _top_rerank_score(hits: list[SearchHitV2]) -> float | None:
     return hits[0].rerank_score if hits[0].rerank_score is not None else hits[0].score
 
 
-def _build_fallback_alternate_query(question: str, search_query: str) -> str:
-    anchors = anchor_terms_from_text(question)
-    topical = re.sub(
-        r"\b(what|which|where|when|how|are|the|and|for|with|from|that|this)\b",
-        " ",
-        search_query,
-        flags=re.IGNORECASE,
-    )
-    topical = re.sub(r"\s+", " ", topical).strip()
+def _build_fallback_alternate_query(rewrite: QueryRewriteResult) -> str:
+    anchors = rewrite.anchor_entities
+    topical = rewrite.lexical_query
     if anchors:
         return f"{' '.join(anchors)} {topical}".strip()[:200]
-    return topical[:200] or search_query[:200]
+    return topical[:200] or rewrite.semantic_query[:200]
 
 
 async def run_retrieval_funnel(
     conn: Connection,
     question: str,
-    search_query: str,
+    rewrite: QueryRewriteResult,
     top_k: int,
     *,
+    semantic_query: str | None = None,
     rerank_query: str | None = None,
     for_chat: bool = True,
+    timings: dict[str, float] | None = None,
+    fts_backend: FtsBackend = "gin",
 ) -> tuple[list[SearchHitV2], FunnelStats]:
     """
     Krok 1: hybrid → ~100 Dzieci (cały korpus + opcjonalna kotwica)
@@ -225,28 +241,56 @@ async def run_retrieval_funnel(
     Krok 3: rerank Cross-Encoder na do RERANK_TOP_N Rodzicach
     Krok 4: filtr progu rerank + top llm_context_limit do LLM
     """
-    anchors = anchor_terms_from_text(question)
+    embed_query = semantic_query or rewrite.semantic_query
+    anchors = rewrite.anchors_for_retrieval(question)
+    lexical = rewrite.lexical_query if embed_query == rewrite.semantic_query else embed_query
+    metadata = (
+        rewrite.metadata_filters
+        if not rewrite.metadata_filters.is_empty()
+        else None
+    )
     child_limit = child_recall_limit(top_k)
+    stage: dict[str, float] = {}
 
     broad_limit = max(child_limit - ANCHOR_CHILD_QUOTA, child_limit // 2)
+    t0 = _tick()
+    broad_timings: dict[str, float] = {}
     children_broad = await search_hybrid_v2(
         conn,
-        search_query,
+        embed_query,
         top_k,
         candidate_limit=broad_limit,
         anchor_terms=anchors,
+        lexical_query=lexical,
+        metadata_filters=metadata,
         title_filter=False,
+        timings=broad_timings if (timings is not None or PROFILE_RAG_TIMING) else None,
+        fts_backend=fts_backend,
     )
+    stage["hybrid_broad_ms"] = _ms(t0)
+    if broad_timings:
+        stage["hybrid_broad_embed_ms"] = broad_timings.get("embed_ms", 0)
+        stage["hybrid_broad_sql_ms"] = broad_timings.get("sql_ms", 0)
 
     if anchors and ANCHOR_CHILD_QUOTA > 0:
+        t0 = _tick()
+        anchor_timings: dict[str, float] = {}
         children_anchor = await search_hybrid_v2(
             conn,
-            search_query,
+            embed_query,
             top_k,
             candidate_limit=ANCHOR_CHILD_QUOTA,
             anchor_terms=anchors,
+            lexical_query=lexical,
+            metadata_filters=metadata,
             title_filter=True,
+            timings=anchor_timings if (timings is not None or PROFILE_RAG_TIMING) else None,
+            fts_backend=fts_backend,
         )
+        stage["hybrid_anchor_ms"] = _ms(t0)
+        if anchor_timings:
+            stage["hybrid_anchor_embed_ms"] = anchor_timings.get("embed_ms", 0)
+            stage["hybrid_anchor_sql_ms"] = anchor_timings.get("sql_ms", 0)
         children = merge_child_hits(
             children_broad,
             children_anchor,
@@ -255,14 +299,18 @@ async def run_retrieval_funnel(
     else:
         children = children_broad
 
+    t0 = _tick()
     parents = collapse_children_to_parents(children)
+    stage["collapse_ms"] = _ms(t0)
 
     rq = rerank_query or question
     rerank_pool = parents[:RERANK_TOP_N] if RERANK_TOP_N > 0 else parents
 
     if RERANK_ENABLED and rerank_pool:
+        t0 = _tick()
         reranked = await rerank_hits_v2(rq, rerank_pool, len(rerank_pool))
-        reranked = _boost_reranked_anchors(question, reranked)
+        stage["rerank_ms"] = _ms(t0)
+        reranked = _boost_reranked_anchors(anchors, reranked)
         elite = filter_by_rerank_threshold(reranked, RERANK_MIN_SCORE)
     else:
         reranked = rerank_pool
@@ -276,12 +324,15 @@ async def run_retrieval_funnel(
         parent_candidates=len(parents),
         parents_reranked=len(rerank_pool),
         rerank_top_score=_top_rerank_score(reranked),
+        timings_ms=stage,
     )
+    if timings is not None:
+        timings.update(stage)
     return hits, stats
 
 
 def _retrieval_accepted(
-    question: str,
+    anchors: list[str],
     hits: list[SearchHitV2],
     rerank_top_score: float | None,
 ) -> tuple[bool, float]:
@@ -289,7 +340,7 @@ def _retrieval_accepted(
         return False, 0.0
 
     top_score = rerank_top_score if rerank_top_score is not None else 0.0
-    anchors_ok = _hits_cover_anchors(question, hits)
+    anchors_ok = _hits_cover_anchors(anchors, hits)
 
     if top_score >= RERANK_MIN_SCORE and anchors_ok:
         confidence = min(0.5 + top_score * 0.5, 0.99)
@@ -304,33 +355,46 @@ def _retrieval_accepted(
 async def retrieve_with_self_rag_v2(
     conn: Connection,
     question: str,
-    search_query: str,
+    rewrite: QueryRewriteResult,
     top_k: int,
     *,
     self_rag: bool = True,
     for_chat: bool = True,
+    timings: dict[str, float] | None = None,
+    fts_backend: FtsBackend = "gin",
 ) -> RetrievalPipelineResult:
     passes = 0
     alternate_used: str | None = None
-    query = search_query
+    semantic_query = rewrite.semantic_query
+    anchors = rewrite.anchors_for_retrieval(question)
     child_limit = child_recall_limit(top_k)
 
     meta_base = {
         "rerank_enabled": RERANK_ENABLED,
         "self_rag_enabled": self_rag,
+        "fts_backend": fts_backend,
         "candidate_limit": child_limit,
     }
 
+    profile = timings is not None or PROFILE_RAG_TIMING
+    pipeline_timings: dict[str, float] = timings if timings is not None else {}
+
     while passes <= (SELF_RAG_MAX_RETRIES if self_rag else 0):
         passes += 1
+        t0 = _tick()
         hits, stats = await run_retrieval_funnel(
             conn,
             question,
-            query,
+            rewrite,
             top_k,
+            semantic_query=semantic_query,
             rerank_query=question,
             for_chat=for_chat,
+            timings=pipeline_timings if profile else None,
+            fts_backend=fts_backend,
         )
+        if profile:
+            pipeline_timings["retrieval_pass_ms"] = _ms(t0)
 
         funnel_meta = {
             "child_candidates": stats.child_candidates,
@@ -341,6 +405,15 @@ async def retrieve_with_self_rag_v2(
         }
 
         if not self_rag:
+            if profile:
+                pipeline_timings["retrieval_total_ms"] = round(
+                    sum(
+                        pipeline_timings.get(k, 0)
+                        for k in pipeline_timings
+                        if k.endswith("_ms")
+                    ),
+                    1,
+                )
             return RetrievalPipelineResult(
                 hits=hits,
                 meta=RetrievalMetaV2(
@@ -350,14 +423,24 @@ async def retrieve_with_self_rag_v2(
                     retrieval_confidence=stats.rerank_top_score,
                     alternate_query_used=alternate_used,
                     accepted=True,
+                    timings_ms=pipeline_timings if profile else None,
                 ),
             )
 
         accepted, confidence = _retrieval_accepted(
-            question, hits, stats.rerank_top_score
+            anchors, hits, stats.rerank_top_score
         )
 
         if accepted:
+            if profile:
+                pipeline_timings["retrieval_total_ms"] = round(
+                    sum(
+                        v
+                        for k, v in pipeline_timings.items()
+                        if k.endswith("_ms") and k != "retrieval_total_ms"
+                    ),
+                    1,
+                )
             return RetrievalPipelineResult(
                 hits=hits,
                 meta=RetrievalMetaV2(
@@ -367,24 +450,28 @@ async def retrieve_with_self_rag_v2(
                     retrieval_confidence=confidence,
                     alternate_query_used=alternate_used,
                     accepted=True,
+                    timings_ms=pipeline_timings if profile else None,
                 ),
             )
 
         alternate: str | None = None
         if passes <= SELF_RAG_MAX_RETRIES:
+            t0 = _tick()
             _, _, alternate = await grade_retrieval_v2(question, hits)
-            alternate = alternate or _build_fallback_alternate_query(question, query)
+            if profile:
+                pipeline_timings["self_rag_grade_ms"] = _ms(t0)
+            alternate = alternate or _build_fallback_alternate_query(rewrite)
 
         if alternate and passes <= SELF_RAG_MAX_RETRIES:
             logger.info(
                 "Self-RAG retry (%d, score=%.3f): %s → %s",
                 passes,
                 stats.rerank_top_score or 0,
-                query[:80],
+                semantic_query[:80],
                 alternate[:80],
             )
             alternate_used = alternate
-            query = alternate
+            semantic_query = alternate
             continue
 
         return RetrievalPipelineResult(

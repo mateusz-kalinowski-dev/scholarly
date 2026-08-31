@@ -1,7 +1,7 @@
-"""RAG v2 — kontekst z parent chunków, cytowanie [n]."""
+"""RAG v2 — kontekst: pełny child (trafienie) + parent (szersza sekcja)."""
 from __future__ import annotations
 
-from app.config import LLM_MAX_CONTEXT_CHARS
+from app.config import LLM_MAX_CONTEXT_CHARS, RAG_CHILD_MAX_CHARS, RAG_PARENT_MAX_CHARS
 from app.schemas import SearchHitV2, SourceChunkV2, SourcePaper
 from app.services.rag import (
     IDK_ANSWER,
@@ -12,7 +12,11 @@ from app.services.rag import (
 
 RAG_V2_SYSTEM_PROMPT = """You are Scholarly, a scientific Q&A assistant for arXiv CS papers.
 
-You receive numbered context excerpts [1], [2], … Each excerpt is a broad section (parent context) retrieved because a relevant passage (child) matched the question. Answer ONLY using information present in these excerpts. Do not use prior knowledge.
+You receive numbered context excerpts [1], [2], … Each excerpt has:
+- Matched passage: the child chunk that matched retrieval (often a table row or precise paragraph).
+- Broader section context: the parent chunk (surrounding section prose).
+
+Answer ONLY using information present in these excerpts. Prefer the matched passage for numbers and tables; use parent context for surrounding methodology. Do not use prior knowledge.
 
 Answer format (required):
 - Write 2–4 complete sentences in plain prose (no markdown, no bullet lists).
@@ -26,6 +30,12 @@ Partial answers:
 When information is missing:
 - If no excerpt contains relevant information, reply with exactly: I do not know.
 - Do not guess."""
+
+
+def _clip(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
 
 
 def hits_to_sources_v2(
@@ -43,8 +53,8 @@ def hits_to_sources_v2(
                 arxiv_id=h.arxiv_id,
                 title=h.title,
                 section_name=h.section_name,
-                child_snippet=h.child_snippet[:400],
-                content=h.content[:800],
+                child_snippet=_clip(h.child_snippet, RAG_CHILD_MAX_CHARS),
+                content=_clip(h.content, RAG_PARENT_MAX_CHARS),
                 score=h.score,
                 hybrid_score=h.hybrid_score,
                 rerank_score=h.rerank_score,
@@ -75,14 +85,15 @@ def _format_context_block_v2(index: int, hit: SearchHitV2) -> str:
     section = hit.section_name or "N/A"
     if hit.subsection_name:
         section = f"{section} / {hit.subsection_name}"
-    matched = hit.child_snippet[:300].replace("\n", " ")
+    child = _clip(hit.child_snippet.strip(), RAG_CHILD_MAX_CHARS)
+    parent = _clip(hit.content.strip(), RAG_PARENT_MAX_CHARS)
     return (
         f"--- Excerpt [{index}] ---\n"
         f"Paper: {hit.title}\n"
         f"arXiv: {hit.arxiv_id}\n"
         f"Section: {section}\n"
-        f"Matched passage: {matched}\n"
-        f"Full section context:\n{hit.content}\n"
+        f"Matched passage (retrieved child):\n{child}\n"
+        f"Broader section context (parent):\n{parent}\n"
     )
 
 

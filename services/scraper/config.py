@@ -12,7 +12,7 @@ CS_CATEGORIES = [
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@rabbitmq:5672/")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 POSTGRES_URL = os.getenv(
-    "POSTGRES_URL", "postgresql://admin:admin@postgres:5432/papers_db"
+    "POSTGRES_URL", "postgresql://admin:admin@postgres:5432/papers_db_v2"
 )
 
 CHECKPOINT_KEY = "scraper:last_paper_timestamp"

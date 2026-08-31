@@ -6,7 +6,7 @@ Backfill keywords + keywords_keybert dla child chunków (KeyBERT batch + regex).
   python backfill_keywords_keybert.py --force
   python backfill_keywords_keybert.py --force --fast   # ~2× GPU + ~30× szybszy zapis DB
 
-Po --fast na końcu uruchom: python rebuild_indexes_v2.py
+Po --fast na końcu uruchom: python rebuild_indexes.py
 """
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from v2.db import prepare_keywords_backfill_fast, restore_keywords_backfill_triggers
-from v2.keywords_keybert import (
+from pipeline.db import prepare_keywords_backfill_fast, restore_keywords_backfill_triggers
+from pipeline.keywords_keybert import (
     build_keybert_input,
     extract_keybert_phrases,
     merge_chunk_keywords,
@@ -31,9 +31,9 @@ from v2.keywords_keybert import (
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("keybert_backfill")
 
-POSTGRES_V2_URL = os.getenv(
-    "POSTGRES_V2_URL",
-    "postgresql://admin:admin@postgres_v2:5432/papers_db_v2",
+POSTGRES_URL = os.getenv(
+    "POSTGRES_URL",
+    "postgresql://admin:admin@postgres:5432/papers_db_v2",
 )
 KEYBERT_MODEL = os.getenv("KEYBERT_MODEL", "BAAI/bge-small-en-v1.5")
 BATCH = int(os.getenv("KEYBERT_BATCH", "512"))
@@ -144,7 +144,7 @@ def main() -> int:
         "Model: %s | batch=%d | baza=%s",
         KEYBERT_MODEL,
         batch_size,
-        POSTGRES_V2_URL.split("@")[-1],
+        POSTGRES_URL.split("@")[-1],
     )
     kw_model = _load_keybert()
     total = 0
@@ -160,7 +160,7 @@ def main() -> int:
                     break
                 batch_limit = min(batch_size, remaining)
 
-            with connect(POSTGRES_V2_URL) as conn:
+            with connect(POSTGRES_URL) as conn:
                 rows = fetch_batch(
                     conn,
                     limit=batch_limit,
@@ -231,7 +231,7 @@ def main() -> int:
     elapsed = time.perf_counter() - t0
     logger.info("Gotowe. Łącznie: %d w %.0fs (%.1f/s)", total, elapsed, total / max(elapsed, 1))
     if args.fast:
-        logger.info("Następny krok: python rebuild_indexes_v2.py")
+        logger.info("Następny krok: python rebuild_indexes.py")
     return 0
 
 

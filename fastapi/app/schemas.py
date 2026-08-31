@@ -6,101 +6,6 @@ from pydantic import BaseModel, Field
 QueryStrategy = Literal["classic", "rewrite"]
 
 
-class SearchRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=2000)
-    top_k: int = Field(default=5, ge=1, le=50)
-    mode: Literal["chunks", "hierarchical"] = "chunks"
-    query_strategy: QueryStrategy = "classic"
-
-
-class SearchHit(BaseModel):
-    chunk_id: str
-    paper_id: str
-    arxiv_id: str
-    title: str
-    arxiv_url: str | None
-    section_name: str | None
-    subsection_name: str | None
-    chunk_index: int | None
-    content: str
-    score: float
-    content_original: str | None = None
-
-
-class SearchResponse(BaseModel):
-    query: str
-    mode: str
-    query_strategy: QueryStrategy = "classic"
-    retrieval_query: str | None = None
-    user_language: str | None = None
-    results: list[SearchHit]
-
-
-class ChatRequest(BaseModel):
-    question: str = Field(..., min_length=1, max_length=2000)
-    top_k: int = Field(default=5, ge=1, le=20)
-    rag: bool = True
-    mode: Literal["chunks", "hierarchical"] = "hierarchical"
-    query_strategy: QueryStrategy = "classic"
-
-
-class SourceChunk(BaseModel):
-    chunk_id: str
-    paper_id: str
-    arxiv_id: str
-    title: str
-    section_name: str | None
-    content: str
-    score: float
-    content_original: str | None = None
-
-
-class SourcePaper(BaseModel):
-    paper_id: str
-    arxiv_id: str
-    title: str
-    arxiv_url: str | None
-
-
-class ChatResponse(BaseModel):
-    question: str
-    answer: str
-    rag_enabled: bool
-    query_strategy: QueryStrategy = "classic"
-    retrieval_query: str | None = None
-    user_language: str | None = None
-    sources: list[SourceChunk]
-    papers: list[SourcePaper]
-
-
-class PaperResponse(BaseModel):
-    id: str
-    arxiv_id: str
-    arxiv_url: str | None
-    pdf_url: str | None
-    title: str
-    summary: str | None
-    authors: list[str]
-    categories: list[str]
-    primary_category: str | None
-    published_at: str | None
-    storage_path: str | None
-    parsing_status: str | None
-    chunking_status: str | None
-    embedding_status: str | None
-    paper_token_count: int | None
-    chunk_count: int
-
-
-# --- v2 hybrid (parent-child, bge-m3) ---
-
-
-class SearchRequestV2(BaseModel):
-    query: str = Field(..., min_length=1, max_length=2000)
-    top_k: int = Field(default=5, ge=1, le=30)
-    query_strategy: QueryStrategy = "classic"
-
-
 class SearchHitV2(BaseModel):
     child_id: str
     parent_id: str
@@ -119,9 +24,34 @@ class SearchHitV2(BaseModel):
     score: float
 
 
+class ChatRequestResearch(BaseModel):
+    """Badania ablacyjne — zawsze RAG + query rewrite."""
+
+    question: str = Field(..., min_length=1, max_length=2000)
+    top_k: int = Field(default=5, ge=1, le=15)
+
+
+class MetadataFiltersOut(BaseModel):
+    arxiv_id: str | None = None
+    author: str | None = None
+    year: int | None = None
+    primary_category: str | None = None
+
+
+class QueryRewriteOut(BaseModel):
+    semantic_query: str
+    keywords: list[str] = Field(default_factory=list)
+    anchor_entities: list[str] = Field(default_factory=list)
+    metadata_filters: MetadataFiltersOut
+    intent: Literal["chitchat", "general_knowledge", "paper_search"]
+    user_language: str
+
+
 class RetrievalMetaV2(BaseModel):
+    research_variant: str | None = None
     rerank_enabled: bool
     self_rag_enabled: bool
+    fts_backend: str | None = None
     candidate_limit: int
     child_candidates: int | None = None
     parent_candidates: int | None = None
@@ -133,6 +63,7 @@ class RetrievalMetaV2(BaseModel):
     alternate_query_used: str | None = None
     answer_verified: bool | None = None
     accepted: bool = True
+    timings_ms: dict[str, float] | None = None
 
 
 class SearchResponseV2(BaseModel):
@@ -140,15 +71,9 @@ class SearchResponseV2(BaseModel):
     query_strategy: QueryStrategy = "classic"
     retrieval_query: str | None = None
     user_language: str | None = None
+    query_rewrite: QueryRewriteOut | None = None
     retrieval: RetrievalMetaV2 | None = None
     results: list[SearchHitV2]
-
-
-class ChatRequestV2(BaseModel):
-    question: str = Field(..., min_length=1, max_length=2000)
-    top_k: int = Field(default=5, ge=1, le=15)
-    rag: bool = True
-    query_strategy: QueryStrategy = "classic"
 
 
 class SourceChunkV2(BaseModel):
@@ -167,13 +92,23 @@ class SourceChunkV2(BaseModel):
     text_score: float
 
 
+class SourcePaper(BaseModel):
+    paper_id: str
+    arxiv_id: str
+    title: str
+    arxiv_url: str | None
+
+
 class ChatResponseV2(BaseModel):
     question: str
     answer: str
-    rag_enabled: bool
+    research_variant: str | None = None
+    rag_enabled: bool = True
     query_strategy: QueryStrategy = "classic"
     retrieval_query: str | None = None
     user_language: str | None = None
+    query_rewrite: QueryRewriteOut | None = None
     retrieval: RetrievalMetaV2 | None = None
+    timings_ms: dict[str, float] | None = None
     sources: list[SourceChunkV2]
     papers: list[SourcePaper]
